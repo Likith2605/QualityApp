@@ -1,0 +1,17 @@
+Starting project at D:\final quality\QualityApp
+Starting Metro Bundler
+warning: Bundler cache is empty, rebuilding (this may take a minute)
+Waiting on http://localhost:8081
+Logs for your project will appear below.
+Android .\index.ts ░░░░░░░░░░░░░░░░  0.0% (0/1)
+Android .\index.ts ▓▓░░░░░░░░░░░░░░ 13.7% ( 10/111)
+Android .\index.ts ▓▓░░░░░░░░░░░░░░ 13.7% ( 90/269)
+Android .\index.ts ▓▓▓▓░░░░░░░░░░░░ 30.5% (216/405)
+Android .\index.ts ▓▓▓▓▓░░░░░░░░░░░ 35.0% (314/551)
+Android .\index.ts ▓▓▓▓▓▓▓▓▓░░░░░░░ 56.8% (483/667)
+Android .\index.ts ▓▓▓▓▓▓▓▓▓░░░░░░░ 57.0% (575/764)
+Android .\index.ts ▓▓▓▓▓▓▓▓▓▓▓░░░░░ 69.0% (693/836)
+Android .\index.ts ▓▓▓▓▓▓▓▓▓▓▓▓░░░░ 78.2% (774/879)
+Android .\index.ts ▓▓▓▓▓▓▓▓▓▓▓▓▓▓░░ 93.5% (905/936)
+Android .\index.ts ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓░ 98.7% ( 974/1003)
+Android Bundled 41211ms index.ts (1026 modules)
