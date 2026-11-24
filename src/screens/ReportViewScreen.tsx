@@ -1,16 +1,15 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useState } from 'react';
 import { Alert, StyleSheet, View } from 'react-native';
-import { useRoute, RouteProp } from '@react-navigation/native';
+import { useRoute, RouteProp, useFocusEffect } from '@react-navigation/native';
 import { useSQLiteContext } from 'expo-sqlite';
-import * as Print from 'expo-print';
-import * as Sharing from 'expo-sharing';
-import { WebView } from 'react-native-webview';
 import { getCheckReport } from '../db/repo';
 import type { CheckReport } from '../db/types';
 import type { RootStackParamList } from '../navigation/types';
 import { buildReportHtml } from '../report/pdf';
-import { colors } from '../theme';
+import { getLogoDataUri } from '../report/logo';
+import { exportReportPdf, printReport } from '../report/printReport';
 import { Button, EmptyState, Loading, Screen } from '../components/ui';
+import ReportHtmlView from '../components/ReportHtmlView';
 
 export default function ReportViewScreen() {
   const db = useSQLiteContext();
@@ -19,49 +18,50 @@ export default function ReportViewScreen() {
   const [report, setReport] = useState<CheckReport | null>(null);
   const [loading, setLoading] = useState(true);
   const [exporting, setExporting] = useState(false);
+  const [html, setHtml] = useState('');
 
-  useEffect(() => {
-    (async () => {
-      const rep = await getCheckReport(db, checkId);
-      setReport(rep);
-      setLoading(false);
-    })();
-  }, [db, checkId]);
-
-  const html = report ? buildReportHtml(report) : '';
+  useFocusEffect(
+    useCallback(() => {
+      let cancelled = false;
+      const isFirstLoad = !report;
+      if (isFirstLoad) setLoading(true);
+      (async () => {
+        const rep = await getCheckReport(db, checkId);
+        if (cancelled) return;
+        setReport(rep);
+        const logo = await getLogoDataUri().catch(() => '');
+        if (cancelled) return;
+        setHtml(rep ? buildReportHtml(rep, logo) : '');
+        if (isFirstLoad) setLoading(false);
+      })();
+      return () => { cancelled = true; };
+    }, [db, checkId])
+  );
 
   const exportPdf = useCallback(async () => {
-    if (!report) {
+    if (!report || !html || exporting) {
       return;
     }
     setExporting(true);
     try {
-      const { uri } = await Print.printToFileAsync({ html });
-      const isAvailable = await Sharing.isAvailableAsync();
-      if (isAvailable) {
-        await Sharing.shareAsync(uri, {
-          mimeType: 'application/pdf',
-          UTI: 'com.adobe.pdf',
-          dialogTitle: `Quality Report QIR-${report.check.id}`,
-        });
-      } else {
-        Alert.alert('Exported', `Report saved to ${uri}`);
-      }
-    } catch {
-      Alert.alert('Error', 'Could not generate the PDF report.');
+      await exportReportPdf(html, `Quality Report QIR-${report.check.id}`);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      Alert.alert('Error', msg || 'Could not generate the PDF report.');
     } finally {
       setExporting(false);
     }
-  }, [report, html]);
+  }, [report, html, exporting]);
 
   const printPdf = useCallback(async () => {
-    if (!report) {
+    if (!report || !html) {
       return;
     }
     try {
-      await Print.printAsync({ html });
-    } catch {
-      Alert.alert('Error', 'Could not open the print dialog.');
+      await printReport(html);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      Alert.alert('Error', msg || 'Could not open the print dialog.');
     }
   }, [report, html]);
 
@@ -79,12 +79,7 @@ export default function ReportViewScreen() {
         <Button title="Export PDF" onPress={exportPdf} loading={exporting} variant="success" style={styles.actionBtn} />
         <Button title="Print" onPress={printPdf} variant="outline" style={styles.actionBtn} />
       </View>
-      <WebView
-        style={styles.webview}
-        originWhitelist={['*']}
-        source={{ html }}
-        textZoom={80}
-      />
+      <ReportHtmlView html={html} />
     </Screen>
   );
 }
@@ -96,10 +91,5 @@ const styles = StyleSheet.create({
   },
   actionBtn: {
     marginVertical: 4,
-  },
-  webview: {
-    flex: 1,
-    backgroundColor: colors.background,
-    marginTop: 6,
   },
 });

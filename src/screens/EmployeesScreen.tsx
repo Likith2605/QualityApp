@@ -1,13 +1,19 @@
-import { useCallback, useEffect, useState } from 'react';
-import { Alert, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Alert, Platform, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { useSQLiteContext } from 'expo-sqlite';
+import * as XLSX from 'xlsx';
 import { addEmployee, adminCount, deleteEmployee, employeeIdExists, getEmployees, updateEmployee } from '../db/repo';
+import { subscribeSync } from '../db/syncEvents';
 import type { Employee, Role } from '../db/types';
 import { ROLE_LABEL, ROLES } from '../db/types';
 import { useAuth } from '../context/AuthContext';
 import { colors } from '../theme';
-import { Badge, Button, Card, EmptyState, Field, Loading, Screen, SectionTitle } from '../components/ui';
+import { confirmAction } from '../utils';
+import { Badge, Button, Card, EmptyState, Field, Loading, Screen, SearchBar, SectionTitle } from '../components/ui';
+import * as Sharing from 'expo-sharing';
+import { File, Paths } from 'expo-file-system';
+import { getServerUrl, getSyncToken } from '../db/sync';
 
 export default function EmployeesScreen() {
   const db = useSQLiteContext();
@@ -22,6 +28,19 @@ export default function EmployeesScreen() {
   const [password, setPassword] = useState('');
   const [role, setRole] = useState<Role>('designer');
   const [saving, setSaving] = useState(false);
+  const [search, setSearch] = useState('');
+  const [backingUp, setBackingUp] = useState(false);
+
+  const filtered = useMemo(() => {
+    if (!search.trim()) return employees;
+    const q = search.toLowerCase();
+    return employees.filter(
+      (e) =>
+        e.name.toLowerCase().includes(q) ||
+        e.employee_id.toLowerCase().includes(q) ||
+        e.role.toLowerCase().includes(q)
+    );
+  }, [employees, search]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -35,6 +54,8 @@ export default function EmployeesScreen() {
       load();
     }, [load])
   );
+
+  useEffect(() => subscribeSync(() => load()), [load]);
 
   useEffect(() => {
     if (!showForm) {
@@ -102,29 +123,106 @@ export default function EmployeesScreen() {
     }
   };
 
-  const handleDelete = (emp: Employee) => {
+  const handleDelete = async (emp: Employee) => {
     if (emp.id === user?.id) {
       Alert.alert('Cannot delete', 'You cannot delete your own account.');
       return;
     }
-    Alert.alert('Delete employee', `Delete ${emp.name} (${emp.employee_id})?`, [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Delete',
-        style: 'destructive',
-        onPress: async () => {
-          if (emp.role === 'admin') {
-            const admins = await adminCount(db);
-            if (admins <= 1) {
-              Alert.alert('Cannot delete', 'At least one admin must remain.');
-              return;
-            }
-          }
-          await deleteEmployee(db, emp.id);
-          load();
+    if (!(await confirmAction('Delete employee', `Delete ${emp.name} (${emp.employee_id})?`, true))) return;
+    try {
+      if (emp.role === 'admin') {
+        const admins = await adminCount(db);
+        if (admins <= 1) {
+          Alert.alert('Cannot delete', 'At least one admin must remain.');
+          return;
+        }
+      }
+      await deleteEmployee(db, emp.id);
+      await load();
+    } catch (e) {
+      Alert.alert('Error', e instanceof Error ? e.message : 'Could not delete the employee.');
+    }
+  };
+
+  const handleExportSpreadsheet = async () => {
+    try {
+      const [employeesData, drawingsData, dimensionsData, checksData, measurementsData] = await Promise.all([
+        getEmployees(db),
+        db.getAllAsync<any>(`SELECT * FROM drawings ORDER BY created_at DESC`),
+        db.getAllAsync<any>(`SELECT * FROM dimensions ORDER BY drawing_id, dim_no`),
+        db.getAllAsync<any>(`SELECT * FROM checks ORDER BY checked_at DESC`),
+        db.getAllAsync<any>(`SELECT * FROM measurements ORDER BY check_id, dimension_id`),
+      ]);
+
+      const workbook = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(employeesData), 'Employees');
+      XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(drawingsData), 'Drawings');
+      XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(dimensionsData), 'Dimensions');
+      XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(checksData), 'Checks');
+      XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(measurementsData), 'Measurements');
+
+      const fileName = 'quality_app_data.xlsx';
+      if (Platform.OS === 'web') {
+        const fileBuffer = XLSX.write(workbook, { type: 'array', bookType: 'xlsx' });
+        const blob = new Blob([fileBuffer], {
+          type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        });
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement('a');
+        anchor.href = url;
+        anchor.download = fileName;
+        anchor.style.display = 'none';
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        return;
+      }
+
+      const spreadsheetFile = new File(Paths.cache, fileName);
+      const base64 = XLSX.write(workbook, { type: 'base64', bookType: 'xlsx' });
+      spreadsheetFile.writeSync(base64, { encoding: 'base64' });
+      await Sharing.shareAsync(spreadsheetFile.uri, {
+        mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        dialogTitle: 'Export Spreadsheet',
+        UTI: 'com.microsoft.excel.xlsx',
+      });
+    } catch (e) {
+      Alert.alert('Export failed', e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const handleBackupToDrive = async () => {
+    if (backingUp) return;
+    const url = await getServerUrl();
+    if (!url) {
+      Alert.alert('Backup unavailable', 'No sync server configured. Set it on the login screen.');
+      return;
+    }
+    const token = await getSyncToken();
+    setBackingUp(true);
+    try {
+      const res = await fetch(url + '/api/admin/backup/google-drive', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
         },
-      },
-    ]);
+      });
+      const j = await res.json().catch(() => null);
+      if (res.ok && j?.success) {
+        Alert.alert(
+          'Google Drive Backup',
+          j.filename ? `Backup completed successfully.\n\nBackup file:\n${j.filename}` : 'Backup completed successfully.'
+        );
+      } else {
+        Alert.alert('Backup failed', 'Backup failed.\nPlease try again.');
+      }
+    } catch {
+      Alert.alert('Backup failed', 'Backup failed.\nPlease try again.');
+    } finally {
+      setBackingUp(false);
+    }
   };
 
   return (
@@ -168,7 +266,9 @@ export default function EmployeesScreen() {
         ) : employees.length === 0 ? (
           <EmptyState message="No employees yet." />
         ) : (
-          employees.map((emp) => (
+          <>
+            <SearchBar value={search} onChangeText={setSearch} placeholder="Search employees..." />
+            {filtered.map((emp) => (
             <Card key={emp.id}>
               <View style={styles.row}>
                 <View style={{ flex: 1 }}>
@@ -192,7 +292,28 @@ export default function EmployeesScreen() {
                 </Text>
               </View>
             </Card>
-          ))
+          ))}
+          </>
+        )}
+
+        {user?.role === 'admin' && (
+          <View style={{ marginTop: 24, paddingHorizontal: 16 }}>
+            <SectionTitle>Data Export</SectionTitle>
+            <Card>
+              <Text style={{ fontSize: 13, color: colors.textMuted, marginBottom: 10 }}>
+                Export data to share or back up.
+              </Text>
+              <Button title="Export Spreadsheet (.xlsx)" onPress={handleExportSpreadsheet} variant="outline" />
+              <Button
+                title={backingUp ? 'Backing up...' : 'Backup to Google Drive'}
+                onPress={handleBackupToDrive}
+                variant="outline"
+                loading={backingUp}
+                disabled={backingUp}
+                style={{ marginTop: 6 }}
+              />
+            </Card>
+          </View>
         )}
       </ScrollView>
     </Screen>

@@ -1,0 +1,26 @@
+{
+  "name": "qc-server",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "migrate": "node scripts/runMigrations.js",
+    "migrate:sqlite": "node scripts/migrateFromSqlite.js",
+    "test": "node --test test/**/*.test.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^3.0.3",
+    "cors": "^2.8.5",
+    "dotenv": "^17.4.2",
+    "exceljs": "^4.4.0",
+    "express": "^4.21.2",
+    "googleapis": "^176.0.0",
+    "pg": "^8.23.1",
+    "socket.io": "^4.8.3"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

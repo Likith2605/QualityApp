@@ -1,9 +1,10 @@
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
-import { Pressable, Text } from 'react-native';
+import { Pressable, Text, View } from 'react-native';
 import type { MainTabParamList } from '../navigation/types';
 import { useAuth } from '../context/AuthContext';
 import { ROLE_LABEL } from '../db/types';
 import { colors } from '../theme';
+import SyncIndicator from './SyncIndicator';
 import DesignerHomeScreen from '../screens/DesignerHomeScreen';
 import QCHomeScreen from '../screens/QCHomeScreen';
 import HistoryScreen from '../screens/HistoryScreen';
@@ -14,7 +15,7 @@ const Tab = createBottomTabNavigator<MainTabParamList>();
 function LogoutButton() {
   const { logout } = useAuth();
   return (
-    <Pressable onPress={() => logout()} style={{ marginRight: 16, padding: 4 }}>
+    <Pressable onPress={() => logout()} style={{ padding: 4 }}>
       <Text style={{ color: colors.danger, fontWeight: '700', fontSize: 14 }}>Logout</Text>
     </Pressable>
   );
@@ -29,7 +30,12 @@ export default function MainTabs() {
       screenOptions={{
         tabBarActiveTintColor: colors.primary,
         tabBarInactiveTintColor: colors.textMuted,
-        headerRight: () => <LogoutButton />,
+        headerRight: () => (
+          <View style={{ flexDirection: 'row', alignItems: 'center', marginRight: 16, gap: 12 }}>
+            <SyncIndicator />
+            <LogoutButton />
+          </View>
+        ),
         headerTintColor: colors.primaryDark,
         tabBarLabelStyle: { fontSize: 12, fontWeight: '600' },
       }}

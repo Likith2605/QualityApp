@@ -1,18 +1,21 @@
 ﻿import { useEffect, useState } from 'react';
-import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Alert, Modal, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { useNavigation, useRoute, RouteProp } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { useSQLiteContext } from 'expo-sqlite';
 import * as ImagePicker from 'expo-image-picker';
 import * as DocumentPicker from 'expo-document-picker';
 import { Directory, File, Paths } from 'expo-file-system';
-import { addDrawing, drawingNoExists, getDrawing, updateDrawing } from '../db/repo';
+import { addDrawing, drawingNoExists, getDrawing, importDimensions, updateDrawing } from '../db/repo';
+import { scheduleAutoSync } from '../db/sync';
+import { importBallooningFile, type ParsedDimension } from '../utils/importBallooning';
 import type { RootStackParamList } from '../navigation/types';
 import { useAuth } from '../context/AuthContext';
 import { DEFAULT_UNIT } from '../config';
 import { colors } from '../theme';
+import { fmt, toleranceText, limits } from '../utils';
 import DrawingImage from '../components/DrawingImage';
-import { Button, Field, Screen } from '../components/ui';
+import { Button, Card, DateField, Field, Screen } from '../components/ui';
 
 async function persistDrawingFile(uri: string, name?: string, mimeType?: string): Promise<string> {
   const dir = new Directory(Paths.document, 'drawings');
@@ -53,8 +56,14 @@ export default function DrawingFormScreen() {
   const [drawingRevDate, setDrawingRevDate] = useState('');
   const [poNo, setPoNo] = useState('');
   const [qty, setQty] = useState('');
+  const [treatment, setTreatment] = useState('');
+  const [hardness, setHardness] = useState('');
   const [imageUri, setImageUri] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [importPreview, setImportPreview] = useState<ParsedDimension[]>([]);
+  const [importFileName, setImportFileName] = useState('');
+  const [importModalVisible, setImportModalVisible] = useState(false);
+  const [importing, setImporting] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -73,6 +82,8 @@ export default function DrawingFormScreen() {
           setDrawingRevDate(d.drawing_rev_date);
           setPoNo(d.po_no);
           setQty(d.qty);
+          setTreatment(d.treatment);
+          setHardness(d.hardness);
           setImageUri(d.image_uri);
         }
       }
@@ -103,6 +114,8 @@ export default function DrawingFormScreen() {
       drawing_rev_date: drawingRevDate,
       po_no: poNo,
       qty,
+      treatment,
+      hardness,
       image_uri: imageUri,
     };
 
@@ -113,11 +126,58 @@ export default function DrawingFormScreen() {
       } else {
         await addDrawing(db, { ...data, created_by: user?.id ?? 0 });
       }
+      scheduleAutoSync(db);
       navigation.goBack();
     } catch {
       Alert.alert('Error', 'Could not save the drawing.');
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleImport = async () => {
+    try {
+      const result = await importBallooningFile();
+      if (!result || result.dims.length === 0) {
+        Alert.alert('No dimensions found', 'Could not extract dimensions from the file.');
+        return;
+      }
+      setImportPreview(result.dims);
+      setImportFileName(result.fileName);
+      setImportModalVisible(true);
+    } catch (e) {
+      Alert.alert('Import Error', e instanceof Error ? e.message : 'Could not read the selected file.');
+    }
+  };
+
+  const confirmImport = async () => {
+    if (!drawingId) {
+      Alert.alert('Save drawing first', 'Please save the drawing before importing dimensions.');
+      setImportModalVisible(false);
+      return;
+    }
+    setImporting(true);
+    try {
+      const dims = importPreview.map((d, i) => ({
+        dim_no: d.dim_no || i + 1,
+        description: d.description,
+        nominal: d.nominal,
+        nominal_text: d.nominal_text || '',
+        tol_upper: d.tol_upper,
+        tol_lower: d.tol_lower,
+      }));
+      const { imported, skipped, lastError } = await importDimensions(db, drawingId, dims);
+      scheduleAutoSync(db);
+      setImportModalVisible(false);
+      setImportPreview([]);
+      const msg = skipped > 0
+        ? `${imported} imported, ${skipped} skipped.\n${lastError ? 'Last error: ' + lastError : ''}`
+        : `${imported} dimension(s) imported from ${importFileName}.`;
+      Alert.alert(skipped > 0 ? 'Partial Import' : 'Imported', msg);
+    } catch (e) {
+      Alert.alert('Error', `Could not import dimensions: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setImporting(false);
     }
   };
 
@@ -178,12 +238,14 @@ export default function DrawingFormScreen() {
         <Field label="Part Name *" value={partName} onChangeText={setPartName} />
         <Field label="Customer" value={customer} onChangeText={setCustomer} />
         <Field label="Revision" value={revision} onChangeText={setRevision} autoCapitalize="characters" />
-        <Field label="Drawing Rev Date" value={drawingRevDate} onChangeText={setDrawingRevDate} placeholder="e.g. 2026-08-01" />
+        <DateField label="Drawing Rev Date" value={drawingRevDate} onChange={setDrawingRevDate} placeholder="Select drawing revision date" />
         <Field label="Material" value={material} onChangeText={setMaterial} />
         <Field label="PO No" value={poNo} onChangeText={setPoNo} />
         <Field label="Invoice No" value={invoiceNo} onChangeText={setInvoiceNo} />
-        <Field label="Invoice Date" value={invoiceDate} onChangeText={setInvoiceDate} placeholder="e.g. 2026-08-01" />
+        <DateField label="Invoice Date" value={invoiceDate} onChange={setInvoiceDate} placeholder="Select invoice date" />
         <Field label="QTY" value={qty} onChangeText={setQty} keyboardType="numeric" />
+        <Field label="Treatment" value={treatment} onChangeText={setTreatment} placeholder="e.g. Zinc Plating, Anodizing" />
+        <Field label="Hardness" value={hardness} onChangeText={setHardness} placeholder="e.g. 180-220 HB, HRC 40" />
         <Field label="Unit" value={unit} onChangeText={setUnit} autoCapitalize="none" />
         <Field label="Notes" value={notes} onChangeText={setNotes} multiline placeholder="Optional remarks" />
 
@@ -209,8 +271,49 @@ export default function DrawingFormScreen() {
           ) : null}
         </View>
 
+        {drawingId ? (
+          <View style={{ paddingHorizontal: 16, marginTop: 8 }}>
+            <Button title="Import from Excel Report" onPress={handleImport} variant="outline" />
+          </View>
+        ) : null}
+
         <Button title={drawingId ? 'Update Drawing' : 'Save Drawing'} onPress={handleSave} loading={saving} style={{ marginTop: 8 }} />
       </ScrollView>
+
+      <Modal visible={importModalVisible} animationType="slide" onRequestClose={() => setImportModalVisible(false)}>
+        <View style={styles.modalRoot}>
+          <View style={styles.modalHeader}>
+            <Text style={styles.modalTitle}>Import from Excel Report</Text>
+            <Text style={styles.modalHint}>{importFileName} — {importPreview.length} dimension(s) found</Text>
+          </View>
+          <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16 }}>
+            {importPreview.map((d, i) => (
+              <Card key={i}>
+                <View style={styles.previewRow}>
+                  <Text style={styles.previewDimNo}>Dim {d.dim_no || i + 1}</Text>
+                  <Text style={styles.previewDesc}>{d.description || '-'}</Text>
+                </View>
+                <View style={styles.previewRow}>
+                  <Text style={styles.previewValue}>
+                    {d.nominal_text && d.nominal_text.trim()
+                      ? d.nominal_text
+                      : `${fmt(d.nominal)}  ${toleranceText(d.tol_upper, d.tol_lower)}`}
+                  </Text>
+                  {d.nominal_text && d.nominal_text.trim() ? null : (
+                    <Text style={styles.previewRange}>
+                      {fmt(limits(d.nominal, d.tol_upper, d.tol_lower).min)} – {fmt(limits(d.nominal, d.tol_upper, d.tol_lower).max)}
+                    </Text>
+                  )}
+                </View>
+              </Card>
+            ))}
+          </ScrollView>
+          <View style={styles.modalFooter}>
+            <Button title="Cancel" onPress={() => setImportModalVisible(false)} variant="ghost" style={{ flex: 1 }} />
+            <Button title={`Import ${importPreview.length} Dimensions`} onPress={confirmImport} loading={importing} style={{ flex: 1 }} />
+          </View>
+        </View>
+      </Modal>
     </Screen>
   );
 }
@@ -265,6 +368,62 @@ const styles = StyleSheet.create({
     color: colors.primary,
     fontWeight: '700',
     fontSize: 14,
+  },
+  modalRoot: {
+    flex: 1,
+    backgroundColor: colors.background,
+  },
+  modalHeader: {
+    padding: 16,
+    paddingBottom: 8,
+    backgroundColor: colors.surface,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+  },
+  modalTitle: {
+    fontSize: 17,
+    fontWeight: '700',
+    color: colors.text,
+  },
+  modalHint: {
+    fontSize: 13,
+    color: colors.textMuted,
+    marginTop: 2,
+  },
+  modalFooter: {
+    flexDirection: 'row',
+    padding: 16,
+    gap: 8,
+    backgroundColor: colors.surface,
+    borderTopWidth: 1,
+    borderTopColor: colors.border,
+  },
+  previewRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 4,
+  },
+  previewDimNo: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: colors.text,
+  },
+  previewDesc: {
+    fontSize: 13,
+    color: colors.textMuted,
+    flex: 1,
+    textAlign: 'right',
+    marginLeft: 8,
+  },
+  previewValue: {
+    fontSize: 13,
+    color: colors.text,
+    fontWeight: '600',
+  },
+  previewRange: {
+    fontSize: 12,
+    color: colors.textMuted,
   },
 });
 

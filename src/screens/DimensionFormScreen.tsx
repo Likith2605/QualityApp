@@ -4,9 +4,10 @@ import { useNavigation, useRoute, RouteProp } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { useSQLiteContext } from 'expo-sqlite';
 import { addDimension, getDimensions, getDrawing, updateDimension } from '../db/repo';
+import { scheduleAutoSync } from '../db/sync';
 import type { RootStackParamList } from '../navigation/types';
 import { colors } from '../theme';
-import { fmt, limits, toleranceText } from '../utils';
+import { fmt, isNumericSpec, limits, toleranceText } from '../utils';
 import { Button, Field, Screen } from '../components/ui';
 
 export default function DimensionFormScreen() {
@@ -36,7 +37,7 @@ export default function DimensionFormScreen() {
         if (existing) {
           setDimNo(String(existing.dim_no));
           setDescription(existing.description);
-          setNominal(String(existing.nominal));
+          setNominal(existing.nominal_text.trim() ? existing.nominal_text : String(existing.nominal));
           setTolUpper(String(existing.tol_upper));
           setTolLower(String(existing.tol_lower));
         }
@@ -52,14 +53,20 @@ export default function DimensionFormScreen() {
     return s.trim() === '' || Number.isNaN(n) ? null : n;
   };
 
+  // Balloon numbers must be whole numbers (the sync server stores dim_no as
+  // an integer; decimals like 10.1 used to fail the entire sync push).
+  const toBalloonNo = (s: string): number | null => {
+    const n = toNum(s);
+    return n === null ? null : Math.max(1, Math.round(n));
+  };
+
   const handleSave = async () => {
-    const dimNoNum = toNum(dimNo);
-    const nominalNum = toNum(nominal);
+    const dimNoNum = toBalloonNo(dimNo);
     const tolUpperNum = toNum(tolUpper);
     const tolLowerNum = toNum(tolLower);
 
-    if (dimNoNum === null || nominalNum === null) {
-      Alert.alert('Missing information', 'Dimension No and Nominal are required.');
+    if (dimNoNum === null) {
+      Alert.alert('Missing information', 'Balloon No is required.');
       return;
     }
     if (tolUpperNum === null || tolLowerNum === null) {
@@ -67,10 +74,20 @@ export default function DimensionFormScreen() {
       return;
     }
 
+    const nominalTrimmed = nominal.trim();
+    if (!nominalTrimmed) {
+      Alert.alert('Missing information', 'Balloon No and Dimension No are required.');
+      return;
+    }
+
+    const nominalIsNumber = isNumericSpec(nominalTrimmed);
+    const nominalNum = nominalIsNumber ? Number(nominalTrimmed) : 0;
+    const nominalText = nominalIsNumber ? '' : nominalTrimmed;
+
     const existing = await getDimensions(db, drawingId);
     const dup = existing.find((x) => x.dim_no === dimNoNum && x.id !== dimensionId);
     if (dup) {
-      Alert.alert('Duplicate', `Dimension No ${dimNoNum} already exists.`);
+      Alert.alert('Duplicate', `Balloon No ${dimNoNum} already exists.`);
       return;
     }
 
@@ -81,6 +98,7 @@ export default function DimensionFormScreen() {
           dim_no: dimNoNum,
           description,
           nominal: nominalNum,
+          nominal_text: nominalText,
           tol_upper: tolUpperNum,
           tol_lower: tolLowerNum,
         });
@@ -90,10 +108,12 @@ export default function DimensionFormScreen() {
           dim_no: dimNoNum,
           description,
           nominal: nominalNum,
+          nominal_text: nominalText,
           tol_upper: tolUpperNum,
           tol_lower: tolLowerNum,
         });
       }
+      scheduleAutoSync(db);
       navigation.goBack();
     } catch {
       Alert.alert('Error', 'Could not save the dimension.');
@@ -102,29 +122,37 @@ export default function DimensionFormScreen() {
     }
   };
 
-  const nominalNum = toNum(nominal);
+  const nominalNum = isNumericSpec(nominal.trim()) ? Number(nominal.trim()) : null;
   const tolUpperNum = toNum(tolUpper);
   const tolLowerNum = toNum(tolLower);
-  const showPreview = nominalNum !== null && tolUpperNum !== null && tolLowerNum !== null;
+  const showPreview = nominal.trim() !== '' && tolUpperNum !== null && tolLowerNum !== null;
 
   return (
     <Screen>
       <ScrollView keyboardShouldPersistTaps="handled" style={{ flex: 1 }} contentContainerStyle={{ paddingVertical: 12 }}>
-        <Field label="Dimension No *" value={dimNo} onChangeText={setDimNo} keyboardType="numeric" />
+        <Field label="Balloon No *" value={dimNo} onChangeText={setDimNo} keyboardType="numeric" />
         <Field label="Description" value={description} onChangeText={setDescription} placeholder="e.g. Outer diameter" />
-        <Field label={`Nominal (${unit}) *`} value={nominal} onChangeText={setNominal} keyboardType="decimal-pad" />
-        <Field label={`Upper Tolerance (+) ${unit}`} value={tolUpper} onChangeText={setTolUpper} keyboardType="decimal-pad" />
-        <Field label={`Lower Tolerance (-) ${unit}`} value={tolLower} onChangeText={setTolLower} keyboardType="decimal-pad" />
+        <Field label={`Dimensions No (mm) *`} value={nominal} onChangeText={setNominal} keyboardType="numbers-and-punctuation" placeholder="e.g. 20.5 or M5" />
+        <Field label={`Upper Tolerance (mm)`} value={tolUpper} onChangeText={setTolUpper} keyboardType="numbers-and-punctuation" />
+        <Field label={`Lower Tolerance (mm)`} value={tolLower} onChangeText={setTolLower} keyboardType="numbers-and-punctuation" />
 
         {showPreview && (
           <View style={styles.preview}>
-            <Text style={styles.previewText}>
-              Nominal {fmt(nominalNum)} {unit}  ·  {toleranceText(tolUpperNum, tolLowerNum)}
-            </Text>
-            <Text style={styles.previewText}>
-              Accepted range: {fmt(limits(nominalNum, tolUpperNum, tolLowerNum).min)} to{' '}
-              {fmt(limits(nominalNum, tolUpperNum, tolLowerNum).max)} {unit}
-            </Text>
+            {isNumericSpec(nominal.trim()) && nominalNum !== null ? (
+              <>
+                <Text style={styles.previewText}>
+                  Dimension No {fmt(nominalNum)} {unit}  ·  {toleranceText(tolUpperNum ?? 0, tolLowerNum ?? 0)}
+                </Text>
+                <Text style={styles.previewText}>
+                  Accepted range: {fmt(limits(nominalNum, tolUpperNum ?? 0, tolLowerNum ?? 0).min)} to{' '}
+                  {fmt(limits(nominalNum, tolUpperNum ?? 0, tolLowerNum ?? 0).max)} {unit}
+                </Text>
+              </>
+            ) : (
+              <Text style={styles.previewText}>
+                Specification: {nominal.trim()}
+              </Text>
+            )}
           </View>
         )}
 
